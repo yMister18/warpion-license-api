@@ -6,8 +6,13 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // Criamos um pool de conexões com o teu MySQL da VPS
+// Criamos o pool de conexões usando propriedades diretas e seguras
 const pool = mysql.createPool({
-    uri: process.env.MONGO_URI, // Usa a string do teu .env
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT) || 3306,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0
