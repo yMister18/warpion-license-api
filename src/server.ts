@@ -1,5 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import cors from 'cors';
 import { 
     verifyLicense, 
     addServerToLicense, 
@@ -14,6 +15,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
+app.use(cors());
 
 // 🔌 Rota do Plugin (Minecraft)
 app.post('/v1/license/verify', verifyLicense);
