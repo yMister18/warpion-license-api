@@ -2,10 +2,10 @@ import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import { z } from 'zod'; // Validador de esquemas
 
 dotenv.config();
 
-// Pool de conexões seguro com o MySQL
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     port: Number(process.env.DB_PORT) || 3306,
@@ -17,15 +17,31 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
+// 📐 Esquemas de Validação (Zod)
+const VerifySchema = z.object({
+    key: z.string().min(5, "A chave é demasiado curta"),
+    ip: z.union([z.string().regex(/^(\d{1,3}\.){3}\d{1,3}$|^([\da-f:]+:[\da-f:]+)$/, "Formato de IP inválido (Suporta IPv4/IPv6)"), z.literal("0.0.0.0"), z.literal("127.0.0.1")]),
+    port: z.number().int().min(1).max(65535, "Porta inválida")
+});
+
+const AddServerSchema = z.object({
+    key: z.string(),
+    ip: z.union([z.string().regex(/^(\d{1,3}\.){3}\d{1,3}$|^([\da-f:]+:[\da-f:]+)$/, "Formato de IP inválido"), z.literal("0.0.0.0"), z.literal("127.0.0.1")]),
+    port: z.number().int().min(1).max(65535),
+    plugins_allowed: z.array(z.string())
+});
+
 /**
- * 1. VERIFICAR LICENÇA (Chamado pelo WarpionCore no Minecraft)
+ * 1. VERIFICAR LICENÇA (WarpionCore)
  */
 export const verifyLicense = async (req: Request, res: Response): Promise<Response> => {
-    const { key, ip, port } = req.body;
-
-    if (!key || !ip || port === undefined) {
-        return res.status(400).json({ status: "ERROR", message: "Parâmetros inválidos. Envie 'key', 'ip' e 'port'." });
+    // Valida o corpo da requisição instantaneamente
+    const parsed = VerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({ status: "ERROR", message: parsed.error.issues[0].message });
     }
+
+    const { key, ip, port } = parsed.data;
 
     try {
         const [licenses]: any = await pool.execute('SELECT * FROM licenses WHERE license_key = ?', [key]);
@@ -40,7 +56,6 @@ export const verifyLicense = async (req: Request, res: Response): Promise<Respon
 
         const [servers]: any = await pool.execute('SELECT * FROM allowed_servers WHERE license_id = ?', [license.id]);
 
-        // Procura correspondência de IP/Porta (com suporte a bypass de localhost)
         const matchedServer = servers.find((srv: any) => {
             const isLocalhost = srv.ip === "0.0.0.0" || srv.ip === "127.0.0.1";
             const ipMatches = srv.ip === ip || (isLocalhost && (ip === "0.0.0.0" || ip === "127.0.0.1"));
@@ -56,7 +71,6 @@ export const verifyLicense = async (req: Request, res: Response): Promise<Respon
 
         const pluginsAllowed: string[] = JSON.parse(matchedServer.plugins_json);
 
-        // Token JWT assinado
         const sessionToken = jwt.sign(
             { licenseKey: license.license_key, ip, port, modules: pluginsAllowed },
             process.env.JWT_SECRET as string,
@@ -74,19 +88,20 @@ export const verifyLicense = async (req: Request, res: Response): Promise<Respon
         });
     } catch (error) {
         console.error("Erro na verificação de licença:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor de autenticação." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
     }
 };
 
 /**
- * 2. ADICIONAR / ATUALIZAR SERVIDOR (Dashboard / Bot do Discord)
+ * 2. ADICIONAR / ATUALIZAR SERVIDOR (Dashboard)
  */
 export const addServerToLicense = async (req: Request, res: Response): Promise<Response> => {
-    const { key, ip, port, plugins_allowed } = req.body;
-
-    if (!key || !ip || port === undefined || !Array.isArray(plugins_allowed)) {
-        return res.status(400).json({ status: "ERROR", message: "Parâmetros inválidos." });
+    const parsed = AddServerSchema.safeParse(req.body);
+    if (!parsed.success) {
+        return res.status(400).json({ status: "ERROR", message: "Dados do servidor inválidos ou malformados." });
     }
+
+    const { key, ip, port, plugins_allowed } = parsed.data;
 
     try {
         const [licenses]: any = await pool.execute('SELECT id, status FROM licenses WHERE license_key = ?', [key]);
@@ -110,12 +125,12 @@ export const addServerToLicense = async (req: Request, res: Response): Promise<R
         return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} vinculado/atualizado com sucesso.` });
     } catch (error) {
         console.error("Erro ao adicionar servidor:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno ao processar a requisição." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
     }
 };
 
 /**
- * 3. REMOVER SERVIDOR (Dashboard / Bot do Discord)
+ * 3. REMOVER SERVIDOR
  */
 export const removeServerFromLicense = async (req: Request, res: Response): Promise<Response> => {
     const { key, ip, port } = req.body;
@@ -136,10 +151,10 @@ export const removeServerFromLicense = async (req: Request, res: Response): Prom
         );
 
         if (result.affectedRows === 0) {
-            return res.status(444).json({ status: "ERROR", message: "Este servidor não estava vinculado a esta licença." });
+            return res.status(400).json({ status: "ERROR", message: "Este servidor não estava vinculado a esta licença." });
         }
 
-        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} removido da licença com sucesso.` });
+        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} removido com sucesso.` });
     } catch (error) {
         console.error("Erro ao remover servidor:", error);
         return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
@@ -147,12 +162,12 @@ export const removeServerFromLicense = async (req: Request, res: Response): Prom
 };
 
 /**
- * 4. CONSULTAR STATUS COMPLETO DA LICENÇA (Dashboard)
+ * 4. CONSULTAR STATUS DA LICENÇA
  */
 export const getLicenseStatus = async (req: Request, res: Response): Promise<Response> => {
-    const { key } = req.query; // Passado como Query Parameter (?key=WP-...)
+    const { key } = req.query;
 
-    if (!key) {
+    if (!key || Array.isArray(key)) {
         return res.status(400).json({ status: "ERROR", message: "Parâmetro 'key' obrigatório na URL." });
     }
 
@@ -165,7 +180,6 @@ export const getLicenseStatus = async (req: Request, res: Response): Promise<Res
         const license = licenses[0];
         const [servers]: any = await pool.execute('SELECT ip, port, plugins_json FROM allowed_servers WHERE license_id = ?', [license.id]);
 
-        // Formata os servidores para devolver o array de plugins decodificado
         const formattedServers = servers.map((srv: any) => ({
             ip: srv.ip,
             port: srv.port,
@@ -188,18 +202,17 @@ export const getLicenseStatus = async (req: Request, res: Response): Promise<Res
 };
 
 /**
- * 5. GERAR NOVA LICENÇA MASTER (Apenas tu usas para criar chaves novas)
+ * 5. GERAR NOVA LICENÇA MASTER (ADMIN)
  */
 export const createLicenseAdmin = async (req: Request, res: Response): Promise<Response> => {
     const { admin_secret, key, owner, email, discord_id } = req.body;
 
-    // Proteção simples: exige que mandes o teu JWT_SECRET no corpo para provar que és o dono da API
     if (admin_secret !== process.env.JWT_SECRET) {
-        return res.status(401).json({ status: "ERROR", message: "Não autorizado. Token secreto administrativo inválido." });
+        return res.status(401).json({ status: "ERROR", message: "Não autorizado." });
     }
 
     if (!key || !owner || !email || !discord_id) {
-        return res.status(400).json({ status: "ERROR", message: "Faltam campos obrigatórios para criação." });
+        return res.status(400).json({ status: "ERROR", message: "Faltam campos obrigatórios." });
     }
 
     try {
@@ -208,12 +221,11 @@ export const createLicenseAdmin = async (req: Request, res: Response): Promise<R
             [key, owner, email, discord_id, 'ACTIVE']
         );
 
-        return res.status(201).json({ status: "SUCCESS", message: `Nova licença MASTER gerada com sucesso para ${owner}.` });
+        return res.status(201).json({ status: "SUCCESS", message: `Nova licença MASTER gerada para ${owner}.` });
     } catch (error: any) {
         if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ status: "ERROR", message: "Esta chave de licença já existe no sistema." });
+            return res.status(400).json({ status: "ERROR", message: "Esta chave de licença já existe." });
         }
-        console.error("Erro ao criar licença master:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno ao gerar licença." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
