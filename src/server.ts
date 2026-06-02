@@ -1,6 +1,12 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import { verifyLicense, addServerToLicense } from './controllers/LicenseController';
+import { 
+    verifyLicense, 
+    addServerToLicense, 
+    removeServerFromLicense, 
+    getLicenseStatus, 
+    createLicenseAdmin 
+} from './controllers/LicenseController';
 
 dotenv.config();
 
@@ -9,12 +15,17 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// 🟢 Rota que o JAR do Minecraft (WarpionCore) vai usar para validar
+// 🔌 Rota do Plugin (Minecraft)
 app.post('/v1/license/verify', verifyLicense);
 
-// 🟢 Rota que a tua Dashboard / Bot do Discord vai usar para dar IPs ao cliente
+// 🖥️ Rotas de Gestão (Dashboard / Discord Bot / Bruno)
 app.post('/v1/license/add-server', addServerToLicense);
+app.delete('/v1/license/remove-server', removeServerFromLicense);
+app.get('/v1/license/status', getLicenseStatus);
+
+// 👑 Rota de Administração Suprema (Criar novas Chaves)
+app.post('/v1/license/admin/create', createLicenseAdmin);
 
 app.listen(port, () => {
-    console.log(`🚀 API Warpion ativa e rodando com segurança na porta ${port}`);
+    console.log(`🚀 [Warpion-API] Sistema de Licenciamento Completo ativo na porta ${port}`);
 });
