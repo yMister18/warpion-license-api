@@ -112,12 +112,19 @@ export const addServerToLicense = async (req: Request, res: Response): Promise<R
             [key]
         );
 
-        if (licenses.length === 0) {
-            return res.status(404).json({ status: "ERROR", message: "A licença informada não existe." });
+        // CORREÇÃO: Validar estritamente se o resultado existe antes de tentar ler o 'id'
+        if (!licenses || licenses.length === 0) {
+            return res.status(404).json({ 
+                status: "ERROR", 
+                message: "A licença informada não existe no banco de dados. Crie a licença primeiro!" 
+            });
         }
 
         if (licenses[0].status !== 'ACTIVE') {
-            return res.status(403).json({ status: "ERROR", message: "Não é possível adicionar servidores a uma licença inativa." });
+            return res.status(403).json({ 
+                status: "ERROR", 
+                message: "Não é possível adicionar servidores a uma licença inativa." 
+            });
         }
 
         const licenseId = licenses[0].id;
