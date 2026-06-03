@@ -229,3 +229,26 @@ export const createLicenseAdmin = async (req: Request, res: Response): Promise<R
         return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
+
+/**
+ * 6. HEALTHCHECK (Monitoramento)
+ */
+export const healthCheck = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        // Testa uma query ultra rápida no MySQL para garantir que a conexão está viva
+        await pool.execute('SELECT 1');
+        
+        return res.status(200).json({
+            status: "UP",
+            timestamp: new Date().toISOString(),
+            database: "CONNECTED"
+        });
+    } catch (error) {
+        return res.status(500).json({
+            status: "DOWN",
+            timestamp: new Date().toISOString(),
+            database: "DISCONNECTED",
+            message: "O banco de dados não respondeu."
+        });
+    }
+};

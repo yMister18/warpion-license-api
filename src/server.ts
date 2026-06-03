@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -7,7 +7,8 @@ import {
     addServerToLicense, 
     removeServerFromLicense, 
     getLicenseStatus, 
-    createLicenseAdmin 
+    createLicenseAdmin,
+    healthCheck
 } from './controllers/LicenseController';
 
 dotenv.config();
@@ -22,16 +23,19 @@ app.use(express.json());
 // 🎛️ Configuração do Limitador de Acessos (Rate Limiter)
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutos
-    max: 100, // Limita cada IP a 100 requisições por janela
+    max: 150, // Aumentado ligeiramente para dar margem a múltiplos servidores ligando juntos
     message: {
         status: "ERROR",
         message: "Muitas requisições vindas deste IP. Tente novamente mais tarde."
     },
-    standardHeaders: true, // Retorna dados de limite nos headers HTTP
+    standardHeaders: true,
     legacyHeaders: false,
 });
 
-// Aplicar o limitador em todas as rotas da API
+// 🟢 Rota de Monitoramento Pública (Sem Rate Limit para não dar falso positivo em painéis)
+app.get('/health', healthCheck);
+
+// Aplicar o limitador nas rotas principais
 app.use('/v1/', apiLimiter);
 
 // 🔌 Rota do Plugin (Minecraft)
@@ -45,6 +49,17 @@ app.get('/v1/license/status', getLicenseStatus);
 // 👑 Rota de Administração Suprema (Criar novas Chaves)
 app.post('/v1/license/admin/create', createLicenseAdmin);
 
+// 🛑 CAPTURADOR GLOBAL DE ERROS (O seguro de vida da API)
+// Se qualquer erro bizarro acontecer na API, este middleware impede o crash e responde com classe
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+    console.error("🚨 Erro Crítico Capturado:", err);
+    
+    return res.status(500).json({
+        status: "ERROR",
+        message: "Ocorreu um erro interno inesperado no servidor de licenças."
+    });
+});
+
 app.listen(port, () => {
-    console.log(`🚀 [Warpion-API] Sistema Seguro e Completo ativo na porta ${port}`);
+    console.log(`🚀 [Warpion-API] Sistema 100% Concluído e Blindado na porta ${port}`);
 });
