@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
-import { z } from 'zod'; // Validador de esquemas
+import { z } from 'zod';
+import crypto from 'crypto'; // 🔐 Biblioteca nativa do Node para criptografia de alto nível
 
 dotenv.config();
 
@@ -17,25 +18,37 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-// 📐 Esquemas de Validação (Zod)
 const VerifySchema = z.object({
-    key: z.string().min(5, "A chave é demasiado curta"),
-    ip: z.union([z.string().regex(/^(\d{1,3}\.){3}\d{1,3}$|^([\da-f:]+:[\da-f:]+)$/, "Formato de IP inválido (Suporta IPv4/IPv6)"), z.literal("0.0.0.0"), z.literal("127.0.0.1")]),
-    port: z.number().int().min(1).max(65535, "Porta inválida")
+    key: z.string().min(5),
+    ip: z.string().refine((val) => {
+        try {
+            require('net').isIP(val);
+            return true;
+        } catch {
+            return val === "0.0.0.0" || val === "127.0.0.1";
+        }
+    }).or(z.literal("0.0.0.0")).or(z.literal("127.0.0.1")),
+    port: z.number().int().min(1).max(65535)
 });
 
 const AddServerSchema = z.object({
     key: z.string(),
-    ip: z.union([z.string().regex(/^(\d{1,3}\.){3}\d{1,3}$|^([\da-f:]+:[\da-f:]+)$/, "Formato de IP inválido"), z.literal("0.0.0.0"), z.literal("127.0.0.1")]),
+    ip: z.string().refine((val) => {
+        try {
+            require('net').isIP(val);
+            return true;
+        } catch {
+            return val === "0.0.0.0" || val === "127.0.0.1";
+        }
+    }).or(z.literal("0.0.0.0")).or(z.literal("127.0.0.1")),
     port: z.number().int().min(1).max(65535),
     plugins_allowed: z.array(z.string())
 });
 
 /**
- * 1. VERIFICAR LICENÇA (WarpionCore)
+ * 1. VERIFICAR LICENÇA COM ASSINATURA DIGITAL (Mecanismo Anti-Pirata)
  */
 export const verifyLicense = async (req: Request, res: Response): Promise<Response> => {
-    // Valida o corpo da requisição instantaneamente
     const parsed = VerifySchema.safeParse(req.body);
     if (!parsed.success) {
         return res.status(400).json({ status: "ERROR", message: parsed.error.issues[0].message });
@@ -71,21 +84,30 @@ export const verifyLicense = async (req: Request, res: Response): Promise<Respon
 
         const pluginsAllowed: string[] = JSON.parse(matchedServer.plugins_json);
 
-        const sessionToken = jwt.sign(
-            { licenseKey: license.license_key, ip, port, modules: pluginsAllowed },
-            process.env.JWT_SECRET as string,
-            { expiresIn: '30m' }
-        );
-
-        return res.status(200).json({
+        // Dados base da resposta
+        const responseData = {
             status: "SUCCESS",
             authorized: true,
             owner: license.owner_name,
-            email: license.email,
-            discord_id: license.discord_id,
             modules: pluginsAllowed,
-            security: { session_token: sessionToken, checksum_required: true }
+            timestamp: Date.now() // Timestamp dinâmico impede ataques de Replay (reutilizar respostas antigas)
+        };
+
+        // 🔐 GERAR CHECKSUM ANTI-ALTERAÇÃO (HMAC-SHA256)
+        // Criamos uma assinatura baseada no conteúdo do JSON + a tua chave ultra secreta do .env
+        const secret = process.env.JWT_SECRET as string;
+        const jsonString = JSON.stringify(responseData);
+        const checksum = crypto.createHmac('sha256', secret).update(jsonString).digest('hex');
+
+        // Retorna os dados puros combinados com a assinatura de segurança no bloco final
+        return res.status(200).json({
+            ...responseData,
+            security: {
+                signature_checksum: checksum,
+                checksum_required: true
+            }
         });
+
     } catch (error) {
         console.error("Erro na verificação de licença:", error);
         return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
@@ -93,20 +115,20 @@ export const verifyLicense = async (req: Request, res: Response): Promise<Respon
 };
 
 /**
- * 2. ADICIONAR / ATUALIZAR SERVIDOR (Dashboard)
+ * 2. ADICIONAR / ATUALIZAR SERVIDOR
  */
 export const addServerToLicense = async (req: Request, res: Response): Promise<Response> => {
     const parsed = AddServerSchema.safeParse(req.body);
     if (!parsed.success) {
-        return res.status(400).json({ status: "ERROR", message: "Dados do servidor inválidos ou malformados." });
+        return res.status(400).json({ status: "ERROR", message: parsed.error.issues[0].message });
     }
 
     const { key, ip, port, plugins_allowed } = parsed.data;
 
     try {
-        const [licenses]: any = await pool.execute('SELECT id, status FROM licenses WHERE license_key = ?', [key]);
+        const [licenses]: any = await pool.execute('SELECT id, status FROM licenses WHERE license_key = ?', [key as string]);
         if (!licenses || licenses.length === 0) {
-            return res.status(404).json({ status: "ERROR", message: "A licença informada não existe no banco de dados." });
+            return res.status(404).json({ status: "ERROR", message: "A licença informada não existe." });
         }
 
         if (licenses[0].status !== 'ACTIVE') {
@@ -122,10 +144,10 @@ export const addServerToLicense = async (req: Request, res: Response): Promise<R
             [licenseId, ip, port, pluginsJsonString, pluginsJsonString]
         );
 
-        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} vinculado/atualizado com sucesso.` });
+        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} vinculado com sucesso.` });
     } catch (error) {
         console.error("Erro ao adicionar servidor:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
 
@@ -134,13 +156,12 @@ export const addServerToLicense = async (req: Request, res: Response): Promise<R
  */
 export const removeServerFromLicense = async (req: Request, res: Response): Promise<Response> => {
     const { key, ip, port } = req.body;
-
     if (!key || !ip || port === undefined) {
-        return res.status(400).json({ status: "ERROR", message: "Envie 'key', 'ip' e 'port' para remover." });
+        return res.status(400).json({ status: "ERROR", message: "Envie 'key', 'ip' e 'port'." });
     }
 
     try {
-        const [licenses]: any = await pool.execute('SELECT id FROM licenses WHERE license_key = ?', [key]);
+        const [licenses]: any = await pool.execute('SELECT id FROM licenses WHERE license_key = ?', [key as string]);
         if (licenses.length === 0) {
             return res.status(404).json({ status: "ERROR", message: "Licença não encontrada." });
         }
@@ -151,13 +172,13 @@ export const removeServerFromLicense = async (req: Request, res: Response): Prom
         );
 
         if (result.affectedRows === 0) {
-            return res.status(400).json({ status: "ERROR", message: "Este servidor não estava vinculado a esta licença." });
+            return res.status(400).json({ status: "ERROR", message: "Este servidor não estava vinculado." });
         }
 
-        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} removido com sucesso.` });
+        return res.status(200).json({ status: "SUCCESS", message: `Servidor ${ip}:${port} removido.` });
     } catch (error) {
         console.error("Erro ao remover servidor:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno no servidor." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
 
@@ -166,9 +187,8 @@ export const removeServerFromLicense = async (req: Request, res: Response): Prom
  */
 export const getLicenseStatus = async (req: Request, res: Response): Promise<Response> => {
     const { key } = req.query;
-
-    if (!key || Array.isArray(key)) {
-        return res.status(400).json({ status: "ERROR", message: "Parâmetro 'key' obrigatório na URL." });
+    if (!key) {
+        return res.status(400).json({ status: "ERROR", message: "Parâmetro 'key' obrigatório." });
     }
 
     try {
@@ -197,12 +217,12 @@ export const getLicenseStatus = async (req: Request, res: Response): Promise<Res
         });
     } catch (error) {
         console.error("Erro ao consultar licença:", error);
-        return res.status(500).json({ status: "ERROR", message: "Erro interno ao buscar dados." });
+        return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
 
 /**
- * 5. GERAR NOVA LICENÇA MASTER (ADMIN)
+ * 5. GERAR NOVA LICENÇA MASTER
  */
 export const createLicenseAdmin = async (req: Request, res: Response): Promise<Response> => {
     const { admin_secret, key, owner, email, discord_id } = req.body;
@@ -212,7 +232,7 @@ export const createLicenseAdmin = async (req: Request, res: Response): Promise<R
     }
 
     if (!key || !owner || !email || !discord_id) {
-        return res.status(400).json({ status: "ERROR", message: "Faltam campos obrigatórios." });
+        return res.status(400).json({ status: "ERROR", message: "Faltam campos." });
     }
 
     try {
@@ -220,35 +240,23 @@ export const createLicenseAdmin = async (req: Request, res: Response): Promise<R
             'INSERT INTO licenses (license_key, owner_name, email, discord_id, status) VALUES (?, ?, ?, ?, ?)',
             [key, owner, email, discord_id, 'ACTIVE']
         );
-
-        return res.status(201).json({ status: "SUCCESS", message: `Nova licença MASTER gerada para ${owner}.` });
+        return res.status(201).json({ status: "SUCCESS", message: `Licença criada para ${owner}.` });
     } catch (error: any) {
         if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(400).json({ status: "ERROR", message: "Esta chave de licença já existe." });
+            return res.status(400).json({ status: "ERROR", message: "Esta chave já existe." });
         }
         return res.status(500).json({ status: "ERROR", message: "Erro interno." });
     }
 };
 
 /**
- * 6. HEALTHCHECK (Monitoramento)
+ * 6. HEALTHCHECK
  */
 export const healthCheck = async (req: Request, res: Response): Promise<Response> => {
     try {
-        // Testa uma query ultra rápida no MySQL para garantir que a conexão está viva
         await pool.execute('SELECT 1');
-        
-        return res.status(200).json({
-            status: "UP",
-            timestamp: new Date().toISOString(),
-            database: "CONNECTED"
-        });
+        return res.status(200).json({ status: "UP", timestamp: new Date().toISOString(), database: "CONNECTED" });
     } catch (error) {
-        return res.status(500).json({
-            status: "DOWN",
-            timestamp: new Date().toISOString(),
-            database: "DISCONNECTED",
-            message: "O banco de dados não respondeu."
-        });
+        return res.status(500).json({ status: "DOWN", timestamp: new Date().toISOString(), database: "DISCONNECTED" });
     }
 };
